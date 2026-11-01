@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -42,7 +48,18 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	mediaType := header.Header.Get("Content-Type")
+	rawContentType := header.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(rawContentType)
+	if err != nil || (mediaType != "image/jpeg" && mediaType != "image/png") {
+		respondWithError(w, http.StatusBadRequest, "Invalid content type", err)
+		return
+	}
+	extension, err := mime.ExtensionsByType(mediaType)
+	if err != nil || len(extension) == 0 {
+		respondWithError(w, http.StatusBadRequest, "Invalid content type", err)
+		return
+	}
+	fileExtension := extension[0]
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -59,10 +76,27 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "You are not the owner of this video", nil)
 		return
 	}
-	tn := thumbnail{data, mediaType}
-	videoThumbnails[videoID] = tn
+	newFileName := make([]byte, 32)
+	rand.Read(newFileName)
+	filePath := filepath.Join(cfg.assetsRoot, base64.RawURLEncoding.EncodeToString(newFileName)+fileExtension)
+	if err := os.MkdirAll(cfg.assetsRoot, os.ModePerm); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create assets directory", err)
+		return
+	}
+	newFile, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create file", err)
+		return
+	}
 
-	thumbnailURL := fmt.Sprintf("http://localhost:8091/api/thumbnails/%s", videoID)
+	_, err = io.Copy(newFile, bytes.NewReader(data))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to save file", err)
+		return
+	}
+	defer newFile.Close()
+
+	thumbnailURL := fmt.Sprintf("http://localhost:8091/%s", filePath)
 	video.ThumbnailURL = &thumbnailURL
 
 	err = cfg.db.UpdateVideo(video)
